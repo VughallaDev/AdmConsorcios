@@ -1,3 +1,0 @@
-﻿id,consorcio_id,unidad_id,ubicacion_detalle,tipo_id,naturaleza,urgencia,titulo,detalle,fecha_reclamo,estado,etapa,resolucion,fecha_cierre,motivo_cierre,solicitante_tipo,solicitante_nombre,solicitante_contacto,canal,operador,actualizado
-"1","1","2","","1","Técnico","Media","Me desborda caca por el baño","desde ayer sale caca de la bañera","2026-09-30 16:14","Abierto","Nuevo","","","","Inquilino","Inquilino pelotudo 1","sdfsd","Teléfono","Operador","2026-09-30 16:16"
-"2","1","","","10","Técnico","Urgente Crítico","Estructural","zdfzdfxczxc","2026-09-30 16:43","Abierto","En espera de visita del proveedor","","","","Propietario","xfdsfdsf","","Teléfono","Operador","2026-10-29 09:59"

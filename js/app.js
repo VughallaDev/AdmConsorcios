@@ -9,15 +9,13 @@ const ls = {
 };
 const state = { meta: null, operador: ls.get('operador', '') };
 
+// Sin servidor: la "API" es el núcleo de datos (core.js) que lee/escribe los CSV de la carpeta elegida.
+let core = null;
 async function api(method, url, body) {
-  const opt = { method, headers: {} };
-  if (body !== undefined) {
-    opt.headers['Content-Type'] = 'application/json';
-    opt.body = JSON.stringify({ ...body, operador: state.operador });
-  }
-  const r = await fetch('/api/' + url, opt);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(data.error || 'Error inesperado'); e.data = data; e.status = r.status; throw e; }
+  if (!core) throw new Error('No hay una carpeta de datos conectada.');
+  const r = await core.handle(method, url, body === undefined ? undefined : { ...body, operador: state.operador });
+  const data = r.data || {};
+  if (r.status >= 400) { const e = new Error(data.error || 'Error inesperado'); e.data = data; e.status = r.status; throw e; }
   return data;
 }
 const GET = u => api('GET', u), POST = (u, b) => api('POST', u, b || {}), PUT = (u, b) => api('PUT', u, b), DEL = u => api('DELETE', u);
@@ -113,6 +111,7 @@ const routes = [];
 const route = (re, fn) => routes.push([re, fn]);
 let current = null;
 async function render() {
+  if (!core) return;
   const hash = location.hash.replace(/^#/, '') || '/inicio';
   const key = hash.split('/')[1];
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.k === key || (key === 'unidades' && a.dataset.k === 'consorcios')));
@@ -677,9 +676,73 @@ route(/^\/config$/, async () => {
 });
 
 /* ====================== arranque ====================== */
+const HANDLE_DB = 'consorcios-app', HANDLE_STORE = 'handles';
+const idb = {
+  open: () => new Promise((ok, ko) => {
+    const rq = indexedDB.open(HANDLE_DB, 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore(HANDLE_STORE);
+    rq.onsuccess = () => ok(rq.result); rq.onerror = () => ko(rq.error);
+  }),
+  async get(k) { try { const db = await this.open(); return await new Promise((ok, ko) => { const r = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get(k); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); }); } catch { return undefined; } },
+  async set(k, v) { try { const db = await this.open(); await new Promise((ok, ko) => { const tx = db.transaction(HANDLE_STORE, 'readwrite'); tx.objectStore(HANDLE_STORE).put(v, k); tx.oncomplete = ok; tx.onerror = () => ko(tx.error); }); } catch { } }
+};
+const soportaCarpetas = typeof window.showDirectoryPicker === 'function';
+
+function pantallaConexion({ saved, error } = {}) {
+  core = null;
+  $('#carpeta').innerHTML = '';
+  $('#main').innerHTML = `<div class="gate">
+    <div class="gate-card">
+      <div class="gate-ico">🏢</div>
+      <h1>Administración de Consorcios</h1>
+      <p class="muted">Elegí la carpeta donde se guardan los datos (archivos CSV). Si es la primera vez, elegí o creá una carpeta vacía: la aplicación crea ahí todas las tablas.</p>
+      ${error ? `<div class="alert err">${esc(error)}</div>` : ''}
+      ${!soportaCarpetas ? `<div class="alert err">Este navegador no permite trabajar con carpetas del disco. Abrí la aplicación con <b>Google Chrome</b> o <b>Microsoft Edge</b>.</div>` : ''}
+      <div class="gate-actions">
+        ${saved ? `<button class="btn primary" id="reconectar">📁 Continuar con «${esc(saved.name)}»</button>` : ''}
+        <button class="btn ${saved ? '' : 'primary'}" id="elegir" ${soportaCarpetas ? '' : 'disabled'}>📂 ${saved ? 'Elegir otra carpeta' : 'Elegir carpeta de datos'}</button>
+      </div>
+      <p class="small muted"><a href="#" id="demo">Probar en modo demo</a> (los datos no se guardan al cerrar).</p>
+    </div></div>`;
+  const abrir = async handle => {
+    try {
+      if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') return pantallaConexion({ saved, error: 'Sin permiso de escritura sobre la carpeta. Aceptá el permiso para poder guardar los datos.' });
+      await idb.set('dir', handle);
+      await conectar(new Consorcios.FolderStore(handle));
+    } catch (e) { pantallaConexion({ saved, error: 'No se pudo abrir la carpeta: ' + e.message }); }
+  };
+  if (saved) $('#reconectar').onclick = () => abrir(saved);
+  $('#elegir').onclick = async () => {
+    try { abrir(await window.showDirectoryPicker({ id: 'consorcios-datos', mode: 'readwrite' })); } catch (e) { if (e.name !== 'AbortError') pantallaConexion({ saved, error: e.message }); }
+  };
+  $('#demo').onclick = ev => { ev.preventDefault(); conectar(new Consorcios.MemoryStore({}, 'modo demo (en memoria)'), true); };
+}
+
+async function conectar(store, demo = false) {
+  const c = new Consorcios.Core(store);
+  try { await c.init(); } catch (e) { pantallaConexion({ error: 'No se pudieron leer los datos: ' + e.message }); return; }
+  core = c;
+  state.meta = await GET('meta');
+  $('#carpeta').innerHTML = `<div class="folder ${demo ? 'demo' : ''}" title="${esc(store.name)}"><span>${demo ? '⚠️ Modo demo — no se guarda' : '📁 ' + esc(store.name)}</span><a href="#" id="cambiar">Cambiar</a></div>`;
+  $('#cambiar').onclick = async ev => { ev.preventDefault(); pantallaConexion({ saved: demo ? undefined : await idb.get('dir') }); };
+  render();
+}
+
+// Si se editaron los CSV fuera de la aplicación (p. ej. con Excel), se vuelven a leer al volver a esta pestaña.
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && core && core.store instanceof Consorcios.FolderStore) {
+    try { await core.reload(); render(); } catch (e) { toast('No se pudo releer la carpeta: ' + e.message, true); }
+  }
+});
+
 (async function init() {
   const op = $('#operador'); op.value = state.operador;
   op.oninput = () => { state.operador = op.value.trim(); ls.set('operador', state.operador); };
-  try { state.meta = await GET('meta'); } catch (e) { $('#main').innerHTML = `<div class="alert err">No se pudo conectar con el servidor: ${esc(e.message)}</div>`; return; }
-  render();
+  const saved = soportaCarpetas ? await idb.get('dir') : undefined;
+  if (saved) {
+    let perm = 'prompt';
+    try { perm = await saved.queryPermission({ mode: 'readwrite' }); } catch { }
+    if (perm === 'granted') { await conectar(new Consorcios.FolderStore(saved)); return; }
+  }
+  pantallaConexion({ saved });
 })();
