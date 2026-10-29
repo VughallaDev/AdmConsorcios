@@ -5,11 +5,16 @@
 #>
 param(
     [int]$Port = 8080,
-    [string]$DataDir = (Join-Path $PSScriptRoot 'data'),
+    [string]$DataDir = '',
     [switch]$NoBrowser
 )
 $ErrorActionPreference = 'Stop'
-$PublicDir = Join-Path $PSScriptRoot 'public'
+# Carpeta de la app: robusto si se lanza desde una ruta de red/UNC
+$AppRoot = $PSScriptRoot
+if (-not $AppRoot -and $MyInvocation.MyCommand.Path) { $AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $AppRoot) { $AppRoot = (Get-Location).Path }
+if (-not $DataDir) { $DataDir = Join-Path $AppRoot 'data' }
+$PublicDir = Join-Path $AppRoot 'public'
 $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir | Out-Null }
