@@ -75,6 +75,8 @@
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         const m = d.error_code || d.error || '';
+        if (r.status === 401 || r.status === 403 || /api key/i.test(d.message || d.msg || ''))
+          throw new StoreError(r.status, 'Supabase rechazó la clave de la aplicación (Invalid API key). Revisá SUPABASE_KEY en js/config.js: debe ser la "Publishable key" de ESTE proyecto, copiada completa.', d.message || d.msg);
         if (m === 'invalid_credentials' || r.status === 400) throw new StoreError(400, 'Email o contraseña incorrectos.', d.msg);
         throw new StoreError(r.status, 'No se pudo iniciar sesión: ' + (d.msg || d.error_description || r.status), d.msg);
       }
