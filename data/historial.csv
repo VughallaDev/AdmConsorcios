@@ -1,0 +1,4 @@
+﻿id,reclamo_id,fecha,accion,detalle,operador
+"1","1","2026-09-30 16:16","Creado","Reclamo registrado por Inquilino pelotudo 1 (Inquilino) vía Teléfono. Urgencia: Media.","Operador"
+"2","2","2026-09-30 16:43","Creado","Reclamo registrado por xfdsfdsf (Propietario) vía Teléfono. Urgencia: Urgente Crítico.","Operador"
+"3","2","2026-10-29 09:59","Etapa","De «Nuevo» a «En espera de visita del proveedor».","Operador"
