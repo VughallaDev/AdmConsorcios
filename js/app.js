@@ -662,9 +662,9 @@ route(/^\/config$/, async () => {
   ${meta.tipos_reclamo.map(t => `<tr><td>${esc(t.icono)} <b>${esc(t.nombre)}</b></td><td><span class="badge ${t.naturaleza === 'Técnico' ? 'b-tec' : 'b-adm'}">${esc(t.naturaleza)}</span></td>
    <td>${t.activo === 'SI' ? '<span class="badge b-open">Activo</span>' : '<span class="badge b-closed">Inactivo</span>'}</td>
    <td style="white-space:nowrap"><button class="btn sm" data-e="${t.id}">✏️</button> <button class="btn sm" data-t="${t.id}">${t.activo === 'SI' ? 'Desactivar' : 'Activar'}</button> <button class="btn sm danger" data-d="${t.id}">🗑</button></td></tr>`).join('')}</tbody></table></div>
-  <h3 class="section-title">🗄️ Base de datos (archivos CSV)</h3>
-  <p class="muted small">Carpeta: <code>${esc(meta.data_dir)}</code> — cada archivo es una tabla con su propio ID; las relaciones se guardan como <code>*_id</code>.</p>
-  <div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Filas</th><th>Columnas</th></tr></thead><tbody>
+  <h3 class="section-title">🗄️ Base de datos</h3>
+  <p class="muted small">Origen de los datos: <code>${esc(meta.data_dir)}</code> — cada tabla tiene su propio ID; las relaciones se guardan como <code>*_id</code>.</p>
+  <div class="table-wrap"><table><thead><tr><th>Tabla</th><th>Filas</th><th>Columnas</th></tr></thead><tbody>
   ${db.map(t => `<tr><td><b>${esc(t.archivo)}</b></td><td>${t.filas}</td><td class="small muted">${t.columnas.map(c => `<span class="pill">${esc(c)}</span>`).join('')}</td></tr>`).join('')}</tbody></table></div>`;
   const tf = t => formModal({ title: t ? 'Editar tipo de reclamo' : 'Nuevo tipo de reclamo', values: t || { icono: '📌' }, fields: [
     { name: 'nombre', label: 'Nombre', required: true }, { name: 'icono', label: 'Ícono (emoji)' }, { name: 'naturaleza', label: 'Naturaleza por defecto', type: 'select', options: meta.naturalezas, required: true }],
@@ -687,62 +687,96 @@ const idb = {
   async set(k, v) { try { const db = await this.open(); await new Promise((ok, ko) => { const tx = db.transaction(HANDLE_STORE, 'readwrite'); tx.objectStore(HANDLE_STORE).put(v, k); tx.oncomplete = ok; tx.onerror = () => ko(tx.error); }); } catch { } }
 };
 const soportaCarpetas = typeof window.showDirectoryPicker === 'function';
+const CFG = window.APP_CONFIG || {};
+const supabaseConfigurado = !!(CFG.SUPABASE_URL && CFG.SUPABASE_KEY);
+const nuevoSupabase = () => new Consorcios.SupabaseStore({ url: CFG.SUPABASE_URL, key: CFG.SUPABASE_KEY });
 
-function pantallaConexion({ saved, error } = {}) {
+/* ---- pantalla de acceso: Supabase (principal) · carpeta CSV (respaldo) · demo ---- */
+function pantallaConexion({ saved, error, email = '' } = {}) {
   core = null;
   $('#carpeta').innerHTML = '';
   $('#main').innerHTML = `<div class="gate">
     <div class="gate-card">
       <div class="gate-ico">🏢</div>
       <h1>Administración de Consorcios</h1>
-      <p class="muted">Elegí la carpeta donde se guardan los datos (archivos CSV). Si es la primera vez, elegí o creá una carpeta vacía: la aplicación crea ahí todas las tablas.</p>
       ${error ? `<div class="alert err">${esc(error)}</div>` : ''}
-      ${!soportaCarpetas ? `<div class="alert err">Este navegador no permite trabajar con carpetas del disco. Abrí la aplicación con <b>Google Chrome</b> o <b>Microsoft Edge</b>.</div>` : ''}
+      ${supabaseConfigurado ? `
+      <form id="login" class="gate-form">
+        <p class="muted">Iniciá sesión para trabajar con la base de datos en la nube.</p>
+        <label>Email<input type="email" id="lg-email" value="${esc(email)}" autocomplete="username" required></label>
+        <label>Contraseña<input type="password" id="lg-pass" autocomplete="current-password" required></label>
+        <button class="btn primary" id="lg-btn" type="submit">☁️ Iniciar sesión</button>
+      </form>` : ''}
+      <hr class="gate-sep">
+      <p class="muted small"><b>Respaldo local:</b> trabajar con una carpeta de archivos CSV en esta PC (no usa internet ni la nube).</p>
+      ${!soportaCarpetas ? `<div class="alert err small">Este navegador no permite trabajar con carpetas. Para usar el respaldo local abrí la aplicación con <b>Chrome</b> o <b>Edge</b>.</div>` : ''}
       <div class="gate-actions">
-        ${saved ? `<button class="btn primary" id="reconectar">📁 Continuar con «${esc(saved.name)}»</button>` : ''}
-        <button class="btn ${saved ? '' : 'primary'}" id="elegir" ${soportaCarpetas ? '' : 'disabled'}>📂 ${saved ? 'Elegir otra carpeta' : 'Elegir carpeta de datos'}</button>
+        ${saved ? `<button class="btn" id="reconectar">📁 Continuar con «${esc(saved.name)}»</button>` : ''}
+        <button class="btn" id="elegir" ${soportaCarpetas ? '' : 'disabled'}>📂 ${saved ? 'Elegir otra carpeta' : 'Elegir carpeta CSV'}</button>
       </div>
       <p class="small muted"><a href="#" id="demo">Probar en modo demo</a> (los datos no se guardan al cerrar).</p>
     </div></div>`;
+  if (supabaseConfigurado) $('#login').onsubmit = async ev => {
+    ev.preventDefault();
+    const btn = $('#lg-btn'), em = $('#lg-email').value.trim();
+    btn.disabled = true; btn.textContent = 'Ingresando…';
+    const st = nuevoSupabase();
+    try { await st.signIn(em, $('#lg-pass').value); await conectar(st, 'supabase'); }
+    catch (e) { pantallaConexion({ saved, error: e.userMessage || e.message, email: em }); }
+  };
   const abrir = async handle => {
     try {
       if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') return pantallaConexion({ saved, error: 'Sin permiso de escritura sobre la carpeta. Aceptá el permiso para poder guardar los datos.' });
       await idb.set('dir', handle);
-      await conectar(new Consorcios.FolderStore(handle));
+      await conectar(new Consorcios.FolderStore(handle), 'csv');
     } catch (e) { pantallaConexion({ saved, error: 'No se pudo abrir la carpeta: ' + e.message }); }
   };
   if (saved) $('#reconectar').onclick = () => abrir(saved);
   $('#elegir').onclick = async () => {
     try { abrir(await window.showDirectoryPicker({ id: 'consorcios-datos', mode: 'readwrite' })); } catch (e) { if (e.name !== 'AbortError') pantallaConexion({ saved, error: e.message }); }
   };
-  $('#demo').onclick = ev => { ev.preventDefault(); conectar(new Consorcios.MemoryStore({}, 'modo demo (en memoria)'), true); };
+  $('#demo').onclick = ev => { ev.preventDefault(); conectar(new Consorcios.MemoryStore({}, 'modo demo (en memoria)'), 'demo'); };
 }
 
-async function conectar(store, demo = false) {
+async function conectar(store, kind = 'csv') {
   const c = new Consorcios.Core(store);
-  try { await c.init(); } catch (e) { pantallaConexion({ error: 'No se pudieron leer los datos: ' + e.message }); return; }
+  try { await c.init(); } catch (e) { pantallaConexion({ error: e.userMessage || 'No se pudieron leer los datos: ' + e.message, saved: await idb.get('dir') }); return; }
   core = c;
   state.meta = await GET('meta');
-  $('#carpeta').innerHTML = `<div class="folder ${demo ? 'demo' : ''}" title="${esc(store.name)}"><span>${demo ? '⚠️ Modo demo — no se guarda' : '📁 ' + esc(store.name)}</span><a href="#" id="cambiar">Cambiar</a></div>`;
-  $('#cambiar').onclick = async ev => { ev.preventDefault(); pantallaConexion({ saved: demo ? undefined : await idb.get('dir') }); };
+  const etiqueta = { demo: '⚠️ Modo demo — no se guarda', csv: '📁 ' + esc(store.name), supabase: '☁️ ' + esc(store.email) }[kind];
+  $('#carpeta').innerHTML = `<div class="folder ${kind === 'demo' ? 'demo' : ''}" title="${esc(store.name)}"><span>${etiqueta}</span><a href="#" id="cambiar">${kind === 'supabase' ? 'Salir' : 'Cambiar'}</a></div>`;
+  $('#cambiar').onclick = async ev => {
+    ev.preventDefault();
+    if (kind === 'supabase') await store.signOut();
+    pantallaConexion({ saved: kind === 'demo' ? undefined : await idb.get('dir') });
+  };
   render();
 }
 
-// Si se editaron los CSV fuera de la aplicación (p. ej. con Excel), se vuelven a leer al volver a esta pestaña.
+// Al volver a esta pestaña se vuelven a leer los datos (por si se editaron los CSV fuera de la app o cargó otro operador).
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && core && core.store instanceof Consorcios.FolderStore) {
+  if (document.visibilityState !== 'visible' || !core) return;
+  if (core.store instanceof Consorcios.FolderStore) {
     try { await core.reload(); render(); } catch (e) { toast('No se pudo releer la carpeta: ' + e.message, true); }
-  }
+  } else if (core.store.rowLevel) render();
 });
 
 (async function init() {
   const op = $('#operador'); op.value = state.operador;
   op.oninput = () => { state.operador = op.value.trim(); ls.set('operador', state.operador); };
   const saved = soportaCarpetas ? await idb.get('dir') : undefined;
-  if (saved) {
+  // 1) Sesión de Supabase guardada: se retoma sin pedir la contraseña
+  const ses = supabaseConfigurado ? Consorcios.SupabaseStore.saved() : null;
+  if (ses) {
+    const st = nuevoSupabase();
+    try { await st.resume(ses); await conectar(st, 'supabase'); return; }
+    catch (e) { if (e.httpStatus === 0) { pantallaConexion({ saved, error: e.userMessage, email: ses.email }); return; } }
+  }
+  // 2) Carpeta CSV usada antes (si ya tiene permiso)
+  if (!supabaseConfigurado && saved) {
     let perm = 'prompt';
     try { perm = await saved.queryPermission({ mode: 'readwrite' }); } catch { }
-    if (perm === 'granted') { await conectar(new Consorcios.FolderStore(saved)); return; }
+    if (perm === 'granted') { await conectar(new Consorcios.FolderStore(saved), 'csv'); return; }
   }
-  pantallaConexion({ saved });
+  pantallaConexion({ saved, email: ses ? ses.email : '' });
 })();

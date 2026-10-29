@@ -24,6 +24,8 @@
     historial: ['id', 'reclamo_id', 'fecha', 'accion', 'detalle', 'operador']
   };
   const TABLES = Object.keys(SCHEMA);
+  // Orden de escritura en la base respetando las claves foráneas (padres antes que hijos).
+  const SYNC_ORDER = ['consorcios', 'unidades', 'personal', 'propietarios', 'unidad_propietarios', 'inquilinos', 'tipos_reclamo', 'proveedores', 'reclamos', 'reclamo_proveedores', 'reiteraciones', 'historial'];
   const REQUIRED = {
     consorcios: ['nombre', 'direccion'], personal: ['consorcio_id', 'nombre', 'rol'], unidades: ['consorcio_id', 'numero_uf'],
     propietarios: ['nombre'], unidad_propietarios: ['unidad_id', 'propietario_id'], inquilinos: ['unidad_id', 'nombre'],
@@ -154,6 +156,13 @@
 
     /* ---- persistencia ---- */
     async load() {
+      if (this.store.rowLevel) {   // base de datos (Supabase): el store entrega las filas ya como objetos de texto
+        const t = await this.store.loadAll();
+        for (const n of TABLES) t[n] = t[n] || [];
+        this.t = t; this.dirty = new Set(); this.loadedAt = Date.now();
+        this.snap = {}; for (const n of TABLES) this.snap[n] = t[n].map(r => Object.assign({}, r));
+        return;
+      }
       const t = {}; const migrate = [];
       for (const name of TABLES) {
         const text = await this.store.read(name);
@@ -179,10 +188,31 @@
       this.ready = true;
     }
     async flush() {
+      if (this.store.rowLevel) return this.flushRows();
       for (const name of [...this.dirty]) {
         await this.store.write(name, csvSerialize(SCHEMA[name], this.t[name]));
         this.dirty.delete(name);
       }
+    }
+    // Base de datos: compara cada tabla modificada con lo leído y envía sólo las filas nuevas/cambiadas/borradas.
+    async flushRows() {
+      const upserts = [], deletes = [];
+      for (const name of SYNC_ORDER) {
+        if (!this.dirty.has(name)) continue;
+        const old = new Map(this.snap[name].map(r => [r.id, r])), cols = SCHEMA[name], now = new Set();
+        const up = [];
+        for (const r of this.t[name]) {
+          now.add(r.id);
+          const o = old.get(r.id);
+          if (!o || cols.some(c => str(o[c]) !== str(r[c]))) up.push(pick(r, cols));
+        }
+        const del = [...old.keys()].filter(id => !now.has(id));
+        if (up.length) upserts.push({ table: name, rows: up });
+        if (del.length) deletes.unshift({ table: name, ids: del });   // los borrados van en orden inverso (hijos primero)
+      }
+      if (upserts.length || deletes.length) await this.store.sync({ upserts, deletes });
+      for (const name of this.dirty) this.snap[name] = this.t[name].map(r => Object.assign({}, r));
+      this.dirty.clear(); this.loadedAt = Date.now();
     }
     // Vuelve a leer los CSV (por si se editaron fuera de la app). Serializado con las demás operaciones.
     reload() {
@@ -196,6 +226,11 @@
     handle(method, url, body) {
       const run = async () => {
         let res;
+        // Con base de datos se vuelve a leer antes de operar, por si otro operador cambió algo (las lecturas seguidas reutilizan la lectura previa).
+        if (this.store.rowLevel && (method !== 'GET' || Date.now() - (this.loadedAt || 0) > 1500)) {
+          try { await this.load(); }
+          catch (e) { return { status: e.httpStatus || 500, data: { error: e.userMessage || 'No se pudo leer la base de datos: ' + e.message } }; }
+        }
         try { res = { status: 200, data: this.route(method, url, body) }; }
         catch (e) {
           if (e instanceof ApiError) res = { status: e.code, data: Object.assign({ error: e.message }, e.extra || {}) };
@@ -204,7 +239,7 @@
         try { await this.flush(); }
         catch (e) {
           try { await this.load(); } catch { }
-          res = { status: 500, data: { error: 'No se pudo guardar en la carpeta de datos: ' + e.message } };
+          res = { status: e.httpStatus || 500, data: { error: e.userMessage || 'No se pudo guardar en la carpeta de datos: ' + e.message } };
         }
         res.data = res.data === undefined ? null : JSON.parse(JSON.stringify(res.data));
         return res;
@@ -657,5 +692,5 @@
     }
   }
 
-  root.Consorcios = { Core, ApiError, MemoryStore, FolderStore, SCHEMA, TABLES, ETAPAS, RESOLUCIONES, URGENCIAS, csvParse, csvSerialize, tableFromCsv };
+  root.Consorcios = { Core, ApiError, MemoryStore, FolderStore, SCHEMA, TABLES, SYNC_ORDER, ETAPAS, RESOLUCIONES, URGENCIAS, csvParse, csvSerialize, tableFromCsv };
 })(typeof window !== 'undefined' ? window : globalThis);

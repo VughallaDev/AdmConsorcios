@@ -168,3 +168,8 @@ textarea{min-height:92px;resize:vertical}
 .folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder a { color: inherit; text-decoration: underline; flex: none; }
 .folder.demo { background: #f59e0b33; }
+.gate-form { display: grid; gap: 12px; text-align: left; margin-top: 8px; }
+.gate-form label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color: #374151; }
+.gate-form input { padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 10px; font: inherit; }
+.gate-form .btn { justify-content: center; padding: 11px; }
+.gate-sep { border: 0; border-top: 1px solid #e5e7eb; margin: 22px 0 14px; }

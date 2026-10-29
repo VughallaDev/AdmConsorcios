@@ -753,6 +753,246 @@ suite('Interfaz (index.html cargado en un iframe, modo demo)', () => {
   });
 });
 
+/* ============================================================ SUPABASE (base simulada) */
+const { SupabaseStore, StoreError } = Consorcios;
+const TESTKEY = 'test-supabase-session';
+
+// Simula lo que hacen Auth y PostgREST de Supabase (login, token, paginado de 1000, upsert, delete, restricciones y errores).
+function fakeSupabase(opts = {}) {
+  const db = {}; for (const t of TABLES) db[t] = [];
+  const st = { db, calls: [], users: { 'op@x.com': 'secreta' }, tokens: new Map(), refresh: new Map(), n: 0, offline: false, failNextRest: null, expireNext: false };
+  const res = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => (body == null ? '' : JSON.stringify(body)) });
+  const issue = email => {
+    const id = ++st.n, at = 'AT' + id, rt = 'RT' + id;
+    st.tokens.set(at, email); st.refresh.set(rt, email);
+    return { access_token: at, refresh_token: rt, expires_in: opts.expiresIn ?? 3600, user: { email } };
+  };
+  st.fetch = async (url, init = {}) => {
+    if (st.offline) throw new TypeError('Failed to fetch');
+    const u = new URL(url), h = init.headers || {}, method = init.method || 'GET';
+    if (!h.apikey) return res(401, { message: 'No API key found in request' });
+    if (u.pathname === '/auth/v1/token') {
+      const b = JSON.parse(init.body), g = u.searchParams.get('grant_type');
+      st.calls.push({ op: 'auth', grant: g });
+      if (g === 'password') return st.users[b.email] === b.password ? res(200, issue(b.email)) : res(400, { error_code: 'invalid_credentials', msg: 'Invalid login credentials' });
+      if (g === 'refresh_token') return st.refresh.has(b.refresh_token) ? res(200, issue(st.refresh.get(b.refresh_token))) : res(400, { error_code: 'refresh_token_not_found', msg: 'Invalid Refresh Token' });
+    }
+    if (u.pathname === '/auth/v1/logout') { st.calls.push({ op: 'logout' }); return res(204, null); }
+    if (u.pathname.startsWith('/rest/v1/')) {
+      const t = u.pathname.split('/').pop();
+      const bearer = (h.Authorization || '').replace('Bearer ', '');
+      if (st.expireNext) { st.expireNext = false; return res(401, { message: 'JWT expired', code: 'PGRST301' }); }
+      if (!st.tokens.has(bearer)) return res(401, { message: 'permission denied', code: '42501' });
+      if (st.failNextRest) { const f = st.failNextRest; st.failNextRest = null; return res(f.status, f.body); }
+      if (method === 'GET') {
+        const off = +u.searchParams.get('offset') || 0, lim = +u.searchParams.get('limit') || 1000;
+        st.calls.push({ op: 'select', t, off });
+        return res(200, db[t].slice().sort((a, b) => a.id - b.id).slice(off, off + lim));
+      }
+      if (method === 'POST') {
+        const rows = JSON.parse(init.body); st.calls.push({ op: 'upsert', t, rows });
+        for (const r of rows) {
+          if (t === 'reclamos' && r.estado === 'Abierto' && db.reclamos.some(x => x.id !== r.id && x.estado === 'Abierto' && x.consorcio_id === r.consorcio_id && x.tipo_id === r.tipo_id && (x.unidad_id ?? 0) === (r.unidad_id ?? 0) && x.ubicacion_detalle.trim().toLowerCase() === r.ubicacion_detalle.trim().toLowerCase()))
+            return res(409, { code: '23505', message: 'duplicate key value violates unique constraint "reclamos_incidente_abierto_uq"' });
+          const i = db[t].findIndex(x => x.id === r.id);
+          if (i >= 0) db[t][i] = r; else db[t].push(r);
+        }
+        return res(201, null);
+      }
+      if (method === 'DELETE') {
+        const ids = u.searchParams.get('id').replace(/^in\.\(|\)$/g, '').split(',').map(Number); st.calls.push({ op: 'delete', t, ids });
+        db[t] = db[t].filter(r => !ids.includes(r.id)); return res(204, null);
+      }
+    }
+    return res(404, { message: 'ruta no simulada: ' + u.pathname });
+  };
+  return st;
+}
+const supaStore = fake => new SupabaseStore({ url: 'https://demo.supabase.co', key: 'sb_publishable_test', fetchFn: (...a) => fake.fetch(...a), sessionKey: TESTKEY });
+async function supaCore(fake, opts) {
+  const s = supaStore(fake); await s.signIn('op@x.com', 'secreta');
+  const c = new Core(s, opts); await c.init();
+  c.call = (m, u, b) => c.handle(m, u, b);
+  c.get = async u => status(await c.handle('GET', u), 200, 'GET ' + u);
+  c.post = async (u, b, code = 200) => status(await c.handle('POST', u, b || {}), code, 'POST ' + u);
+  c.put = async (u, b, code = 200) => status(await c.handle('PUT', u, b || {}), code, 'PUT ' + u);
+  c.del = async (u, code = 200) => status(await c.handle('DELETE', u), code, 'DELETE ' + u);
+  return c;
+}
+
+suite('Supabase · inicio de sesión', () => {
+  test('contraseña incorrecta => error claro y sin sesión', async () => {
+    const f = fakeSupabase(), s = supaStore(f);
+    let err; try { await s.signIn('op@x.com', 'mala'); } catch (e) { err = e; }
+    ok(err instanceof StoreError, 'es StoreError'); eq(err.httpStatus, 400); ok(/incorrectos/.test(err.userMessage)); eq(s.session, null);
+  });
+  test('inicio correcto guarda la sesión; se puede retomar sin pedir contraseña', async () => {
+    const f = fakeSupabase(), s = supaStore(f); await s.signIn('op@x.com', 'secreta');
+    eq(s.email, 'op@x.com');
+    const saved = SupabaseStore.saved(TESTKEY); eq(saved.email, 'op@x.com'); ok(saved.refresh_token);
+    const s2 = supaStore(f); await s2.resume(saved);
+    eq(s2.email, 'op@x.com'); ok(s2.session.access_token !== saved.access_token, 'token renovado');
+    await s.signOut(); eq(SupabaseStore.saved(TESTKEY), null);
+    ok(f.calls.some(c => c.op === 'logout'));
+  });
+  test('una sesión vencida/inválida no se puede retomar y se descarta', async () => {
+    const f = fakeSupabase(), s = supaStore(f);
+    let err; try { await s.resume({ access_token: 'x', refresh_token: 'RT-viejo', expires_at: 0, email: 'op@x.com' }); } catch (e) { err = e; }
+    ok(err, 'falla'); eq(SupabaseStore.saved(TESTKEY), null);
+  });
+  test('sin sesión no se leen datos', async () => {
+    const f = fakeSupabase(), s = supaStore(f);
+    let err; try { await s.loadAll(); } catch (e) { err = e; }
+    eq(err.httpStatus, 401);
+  });
+  test('el token se renueva solo cuando está por vencer', async () => {
+    const f = fakeSupabase({ expiresIn: 30 }), s = supaStore(f); await s.signIn('op@x.com', 'secreta');
+    const antes = f.calls.filter(c => c.grant === 'refresh_token').length;
+    await s.loadAll();
+    ok(f.calls.filter(c => c.grant === 'refresh_token').length > antes, 'refrescó antes de consultar');
+  });
+  test('si el servidor responde 401 por token vencido, renueva y reintenta una vez', async () => {
+    const f = fakeSupabase(), s = supaStore(f); await s.signIn('op@x.com', 'secreta');
+    f.expireNext = true;
+    const d = await s.loadAll(); eq(Object.keys(d).length, 12);
+  });
+  test('sin internet => error claro (status 0)', async () => {
+    const f = fakeSupabase(), s = supaStore(f); f.offline = true;
+    let err; try { await s.signIn('op@x.com', 'secreta'); } catch (e) { err = e; }
+    eq(err.httpStatus, 0); ok(/conexión/.test(err.userMessage));
+  });
+});
+
+suite('Supabase · lectura y escritura de datos', () => {
+  test('al conectar a una base vacía carga los 15 tipos de reclamo con id numérico', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    eq(f.db.tipos_reclamo.length, 15); eq(typeof f.db.tipos_reclamo[0].id, 'number');
+    eq((await c.get('tipos_reclamo')).length, 15);
+  });
+  test('tipos de datos enviados: ids y claves foráneas numéricos, unidad vacía = null, profesiones como arreglo', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    const pv = await c.post('proveedores', { nombre: 'P', telefono: '1', tipo: ['Plomero', 'Gasista'] });
+    const r = await c.post('reclamos', { consorcio_id: cons.id, tipo_id: '1', urgencia: 'Alta', detalle: 'x', solicitante_nombre: 'Z', proveedor_ids: [pv.id] });
+    const row = f.db.reclamos[0];
+    eq([typeof row.id, typeof row.consorcio_id, typeof row.tipo_id, row.unidad_id], ['number', 'number', 'number', null]);
+    eq(f.db.proveedores[0].tipo, ['Plomero', 'Gasista']);
+    eq(f.db.reclamo_proveedores.length, 1); eq(f.db.historial.length >= 2, true);
+    const det = await c.get('reclamos/' + r.id);
+    eq([det.unidad_id, det.proveedores[0].tipo, typeof det.id], ['', ['Plomero', 'Gasista'], 'string'], 'la app ve texto y arreglos');
+  });
+  test('sólo se envían las filas que cambiaron', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    const a = await c.post('propietarios', { nombre: 'A' }); await c.post('propietarios', { nombre: 'B' });
+    f.calls.length = 0;
+    await c.put('propietarios/' + a.id, { telefono: '99' });
+    const ups = f.calls.filter(x => x.op === 'upsert');
+    eq(ups.length, 1); eq(ups[0].rows.length, 1); eq(ups[0].rows[0].telefono, '99');
+  });
+  test('una consulta que no escribe no genera escrituras', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f); f.calls.length = 0;
+    await c.get('resumen'); await c.get('consorcios');
+    eq(f.calls.filter(x => x.op === 'upsert' || x.op === 'delete').length, 0);
+  });
+  test('borrados en orden: primero los hijos y después el padre', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    const u = await c.post('unidades', { consorcio_id: cons.id, numero_uf: '1' });
+    await c.post('inquilinos', { unidad_id: u.id, nombre: 'I' }); await c.post('personal', { consorcio_id: cons.id, nombre: 'E', rol: 'Encargado' });
+    f.calls.length = 0;
+    await c.del('consorcios/' + cons.id);
+    const orden = f.calls.filter(x => x.op === 'delete').map(x => x.t);
+    ok(orden.indexOf('inquilinos') < orden.indexOf('unidades') && orden.indexOf('unidades') < orden.indexOf('consorcios') && orden.indexOf('personal') < orden.indexOf('consorcios'), 'orden: ' + orden.join(' > '));
+    eq(f.db.consorcios.length + f.db.unidades.length + f.db.inquilinos.length + f.db.personal.length, 0);
+  });
+  test('altas en orden: el padre se guarda antes que el hijo', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    f.calls.length = 0;
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    await c.post('reclamos', { consorcio_id: cons.id, tipo_id: '1', urgencia: 'Baja', detalle: 'x', solicitante_nombre: 'Z' });
+    const orden = f.calls.filter(x => x.op === 'upsert').map(x => x.t);
+    ok(orden.indexOf('consorcios') < orden.indexOf('reclamos') && orden.indexOf('reclamos') < orden.indexOf('historial'), orden.join(' > '));
+  });
+  test('lee más de 1000 filas paginando', async () => {
+    const f = fakeSupabase(); const s = supaStore(f); await s.signIn('op@x.com', 'secreta');
+    for (let i = 1; i <= 2500; i++) f.db.propietarios.push({ id: i, nombre: 'P' + i, dni: '', telefono: '', telefono_alt: '', email: '', observaciones: '' });
+    const d = await s.loadAll();
+    eq(d.propietarios.length, 2500); eq(d.propietarios[2499].id, '2500');
+    eq(f.calls.filter(x => x.op === 'select' && x.t === 'propietarios').length, 3);
+  });
+  test('flujo completo de reclamo contra la base: alta, duplicado, etapa, cierre, reapertura', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    const nuevo = () => c.call('POST', 'reclamos', { consorcio_id: cons.id, tipo_id: '1', urgencia: 'Alta', detalle: 'x', solicitante_nombre: 'Z' });
+    const r = status(await nuevo(), 200);
+    status(await nuevo(), 409);
+    eq((await c.post(`reclamos/${r.id}/etapa`, { etapa: 'Esperando presupuesto' })).etapa, 'Esperando presupuesto');
+    await c.post(`reclamos/${r.id}/cerrar`, { resolucion: 'Desestimado', motivo: 'no corresponde' });
+    eq(f.db.reclamos[0].estado, 'Cerrado'); eq(f.db.reclamos[0].resolucion, 'Desestimado');
+    const r2 = status(await nuevo(), 200);
+    status(await c.call('POST', `reclamos/${r.id}/reabrir`, { motivo: 'x' }), 409);
+    await c.post(`reclamos/${r2.id}/cerrar`, { resolucion: 'Anulado', motivo: 'error' });
+    eq((await c.post(`reclamos/${r.id}/reabrir`, { motivo: 'volvió' })).estado, 'Abierto');
+    eq(f.db.reclamos.length, 2, 'nada se borró');
+  });
+});
+
+suite('Supabase · errores y varios operadores', () => {
+  test('la restricción de la base contra duplicados se traduce a un mensaje claro (409) y la app se resincroniza', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    // otro operador cargó el mismo incidente justo antes: la app aún no lo sabe
+    f.db.reclamos.push({ id: 50, consorcio_id: +cons.id, unidad_id: null, ubicacion_detalle: '', tipo_id: 1, naturaleza: 'Técnico', urgencia: 'Alta', titulo: 't', detalle: 'x', fecha_reclamo: '', estado: 'Abierto', etapa: 'Nuevo', resolucion: '', fecha_cierre: '', motivo_cierre: '', solicitante_tipo: 'Otro', solicitante_nombre: 'Z', solicitante_contacto: '', canal: '', operador: '', actualizado: '' });
+    // al operar, la app relee la base primero, así que detecta el duplicado sola
+    const r = await c.call('POST', 'reclamos', { consorcio_id: cons.id, tipo_id: '1', urgencia: 'Alta', detalle: 'x', solicitante_nombre: 'Z' });
+    eq(r.status, 409); ok(/reiteraci/i.test(r.data.error)); eq(r.data.duplicados[0].id, '50');
+  });
+  test('si la base rechaza igualmente la escritura, se informa con mensaje claro y no queda estado a medias en pantalla', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    f.failNextRest = null;
+    const original = f.fetch; let escrituras = 0;
+    f.fetch = async (url, init = {}) => {
+      if ((init.method || 'GET') === 'POST' && /\/rest\/v1\/reclamos/.test(url)) { escrituras++; return { ok: false, status: 409, json: async () => ({ code: '23505', message: 'duplicate key ... "reclamos_incidente_abierto_uq"' }), text: async () => '' }; }
+      return original(url, init);
+    };
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    const r = await c.call('POST', 'reclamos', { consorcio_id: cons.id, tipo_id: '1', urgencia: 'Alta', detalle: 'x', solicitante_nombre: 'Z' });
+    eq(r.status, 409); ok(/mismo incidente/.test(r.data.error)); eq(escrituras, 1);
+    eq((await c.get('reclamos')).length, 0, 'el reclamo fallido no aparece');
+  });
+  test('violación de clave foránea => 409 con explicación', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    f.failNextRest = null;
+    const original = f.fetch;
+    f.fetch = async (url, init = {}) => ((init.method || 'GET') === 'DELETE' ? { ok: false, status: 409, json: async () => ({ code: '23503', message: 'violates foreign key constraint' }), text: async () => '' } : original(url, init));
+    const cons = await c.post('consorcios', { nombre: 'A', direccion: 'B' });
+    const r = await c.call('DELETE', 'consorcios/' + cons.id);
+    eq(r.status, 409); ok(/dependen/.test(r.data.error));
+  });
+  test('dos operadores: cada operación parte de lo último guardado, IDs distintos y nada se pisa', async () => {
+    const f = fakeSupabase(); const a = await supaCore(f), b = await supaCore(f);
+    const p1 = await a.post('propietarios', { nombre: 'De A' });
+    const p2 = await b.post('propietarios', { nombre: 'De B' });
+    ok(p1.id !== p2.id, 'ids distintos');
+    a.loadedAt = 0;   // pasaron más de 1,5 s: la lectura vuelve a consultar la base
+    eq((await a.get('propietarios')).map(p => p.nombre).sort(), ['De A', 'De B']);
+    eq(f.db.propietarios.length, 2);
+  });
+  test('una lectura falla con mensaje claro si no hay conexión', async () => {
+    const f = fakeSupabase(); const c = await supaCore(f);
+    f.offline = true; c.loadedAt = 0;
+    const r = await c.call('GET', 'consorcios');
+    ok(/conexión/.test(r.data.error), r.data.error);
+  });
+  test('toDb/fromDb son inversos', () => {
+    const { fromDb, toDb } = Consorcios._supa;
+    const row = { id: '7', nombre: 'P', telefono: '1', email: '', tipo: 'A|B', empresa: '', observaciones: 'ñ', activo: 'SI' };
+    eq(fromDb('proveedores', JSON.parse(JSON.stringify(toDb('proveedores', row)))), row);
+    const rec = { id: '1', consorcio_id: '2', unidad_id: '', tipo_id: '3' };
+    eq(toDb('reclamos', rec).unidad_id, null);
+  });
+});
+
 /* ============================================================ EJECUCIÓN */
 async function runAll() {
   const out = document.getElementById('out'); const sum = document.getElementById('sum');
